@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>known_locations_tf_server</name>
+  <version>0.0.1</version>
+  <description>Known locations TF server</description>
+
+  <maintainer email="angel@example.com">Angel</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <build_depend>rclpy</build_depend>
+  <build_depend>known_locations_interfaces</build_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>known_locations_interfaces</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+
+
+
+
+
+
+
+
+
+
+
+
+
