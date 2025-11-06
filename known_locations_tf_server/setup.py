@@ -14,6 +14,7 @@ setup(
     entry_points={
         'console_scripts': [
             'known_locs_node = known_locations_tf_server.known_locs_node:main',
+            'known_locs_node_nav = known_locations_tf_server.known_locs_node_nav:main',
         ],
     },
 )
