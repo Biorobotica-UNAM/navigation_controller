@@ -169,33 +169,31 @@ class KnownLocationsServer(Node):
         resp.success = True
         return resp
     
-     def callback_get(self, req, resp=None):
-        resp = LocationsGet.Response()
-        try:
-            df = self.yaml_to_df()
-            loc = df[df['child_id_frame'] == req.location_name]
-            if loc.empty:
-                resp.success = False
-                resp.message = f"Location '{req.location_name}' not found"
-                return resp
-
-            pose = Pose()
-            pose.position.x = float(loc['x'].iloc[0])
-            pose.position.y = float(loc['y'].iloc[0])
-            pose.position.z = 0.0
-            pose.orientation.x = float(loc['qx'].iloc[0])
-            pose.orientation.y = float(loc['qy'].iloc[0])
-            pose.orientation.z = float(loc['qz'].iloc[0])
-            pose.orientation.w = float(loc['qw'].iloc[0])
-
-            resp.pose = pose
-            resp.success = True
-            resp.message = "OK"
-        except Exception as e:
-            self.get_logger().error(f"Error reading YAML: {e}")
-            resp.success = False
-            resp.message = "Error reading YAML"
-        return resp
+    def callback_get(self, req, resp=None):
+       resp = LocationsGet.Response()
+       try:
+           df = self.yaml_to_df()
+           loc = df[df['child_id_frame'] == req.location_name]
+           if loc.empty:
+               resp.success = False
+               resp.message = f"Location '{req.location_name}' not found"
+               return resp
+           pose = Pose()
+           pose.position.x = float(loc['x'].iloc[0])
+           pose.position.y = float(loc['y'].iloc[0])
+           pose.position.z = 0.0
+           pose.orientation.x = float(loc['qx'].iloc[0])
+           pose.orientation.y = float(loc['qy'].iloc[0])
+           pose.orientation.z = float(loc['qz'].iloc[0])
+           pose.orientation.w = float(loc['qw'].iloc[0])
+           resp.pose = pose
+           resp.success = True
+           resp.message = "OK"
+       except Exception as e:
+           self.get_logger().error(f"Error reading YAML: {e}")
+           resp.success = False
+           resp.message = "Error reading YAML"
+       return resp
 
 
 def main(args=None):
