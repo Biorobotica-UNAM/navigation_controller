@@ -14,7 +14,7 @@ door:
 - qy: 0.0
 - qz: -0.706
 - qw: 0.707
-living_room:
+kitchen:
 - x: 7.976
 - y: 3.07
 - theta: -3.086
