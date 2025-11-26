@@ -83,7 +83,7 @@ class KnownLocationsServer(Node):
         self.tf_static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
 
         # Publisher para goals de navegación
-        self.goal_pub = self.create_publisher(PoseStamped, '/move_base_simple/goal', 10)
+        self.goal_pub = self.create_publisher(PoseStamped, '/nav_control/goal', 10)
 
         # Servicios
         self.srv_add = self.create_service(LocationsServer, 'known_location_add', self.callback_add)
