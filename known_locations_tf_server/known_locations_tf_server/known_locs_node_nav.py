@@ -2,12 +2,16 @@
 import os
 import math
 import tempfile
+import threading
 from copy import deepcopy
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
+from actionlib_msgs.msg import GoalStatus
 import tf_transformations as tf
 import tf2_ros
 import yaml
@@ -84,12 +88,19 @@ class KnownLocationsServer(Node):
 
         # Publisher para goals de navegación
         self.goal_pub = self.create_publisher(PoseStamped, '/nav_control/goal', 10)
+        self.sub = self.create_subscription(GoalStatus, '/navigation/status', self.callback_status_nav,10)
 
         # Servicios
         self.srv_add = self.create_service(LocationsServer, 'known_location_add', self.callback_add)
         self.srv_update = self.create_service(LocationsServer, 'update_yaml_interactive', self.callback_update)  # placeholder
         self.srv_get = self.create_service(LocationsGet, 'known_location_get', self.callback_get)
         self.srv_goal = self.create_service(LocationsServer, 'known_location_goal', self.callback_goal)
+
+        self._cv = threading.Condition()
+        self._goal_finished = False
+        self._goal_succeeded = False
+        self._last_status = 0
+        self._last_text = ""
 
         # Al iniciar: leer YAML, republicar TF estáticas
         self.df = self.yaml_to_df()
@@ -189,6 +200,21 @@ class KnownLocationsServer(Node):
         df = pd.DataFrame(data, columns=['x', 'y', 'th', 'qx', 'qy', 'qz', 'qw'])
         df['child_id_frame'] = locations
         return df
+    
+    def callback_status_nav(self, msg: GoalStatus):
+        with self._cv:
+            self._last_status = msg.status
+            self._last_text = msg.text
+
+            if msg.status == GoalStatus.STATUS_SUCCEEDED or msg.status == 3:
+                self._goal_finished = True
+                self._goal_succeeded = True
+                self._cv.notify_all()
+            elif msg.status == GoalStatus.STATUS_ABORTED or msg.status == 4:
+                self._goal_finished = True
+                self._goal_succeeded = False
+                self._cv.notify_all()
+        
 
     # ---------- Servicios ----------
     def callback_add(self, req, _resp=None):
@@ -259,14 +285,48 @@ class KnownLocationsServer(Node):
                 resp.success = False
                 return resp
 
+            with self._cv:
+                self._goal_finished = False
+                self._goal_succeeded = False
+                self._last_status = 0
+                self._last_text = ""
+
             msg = PoseStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "map"
             msg.pose = pose
 
             self.goal_pub.publish(msg)
-            resp.success = True
-            self.get_logger().info(f"Goal publicado a '{req.location_name}' en /move_base_simple/goal")
+            self.get_logger().info(f"Goal publicado a '{req.location_name}'")
+
+            timeout_sec = 120.0  # por ejemplo 2 minutos
+            start_time = self.get_clock().now()
+
+            with self._cv:
+                while not self._goal_finished:
+                    now = self.get_clock().now()
+                    elapsed = (now - start_time).nanoseconds / 1e9
+                    remaining = timeout_sec - elapsed
+
+                    if remaining <= 0.0:
+                        # Timeout: nadie marcó _goal_finished a True
+                        self.get_logger().warn("Timeout esperando GoalStatus de navegación")
+                        resp.success = False
+                        return resp
+
+                    # Espera (libera el lock mientras tanto)
+                    self._cv.wait(timeout=remaining)
+
+                # Si salimos del while es porque _goal_finished == True
+                if self._goal_succeeded:
+                    resp.success = True
+                    self.get_logger().info("Navegación completada correctamente")
+                else:
+                    resp.success = False
+                    self.get_logger().warn(
+                        f"Navegación falló. status={self._last_status}, text='{self._last_text}'"
+                    )
+
         except Exception as e:
             self.get_logger().error(f"No se pudo publicar goal: {e}")
             resp.success = False
@@ -276,14 +336,18 @@ class KnownLocationsServer(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = KnownLocationsServer()
+
+    # === USAR MULTITHREADED EXECUTOR ===
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()   # <-- NO usar rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
