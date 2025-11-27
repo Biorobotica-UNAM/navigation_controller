@@ -9,6 +9,7 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
 
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from actionlib_msgs.msg import GoalStatus
@@ -80,6 +81,8 @@ class KnownLocationsServer(Node):
             except Exception as e:
                 self.get_logger().warn(f"No se pudo crear YAML: {e}")
 
+        self._cb_group = ReentrantCallbackGroup()
+
         # TF
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -88,13 +91,13 @@ class KnownLocationsServer(Node):
 
         # Publisher para goals de navegación
         self.goal_pub = self.create_publisher(PoseStamped, '/nav_control/goal', 10)
-        self.sub = self.create_subscription(GoalStatus, '/navigation/status', self.callback_status_nav,10)
+        self.sub = self.create_subscription(GoalStatus, '/navigation/status', self.callback_status_nav,10, callback_group=self._cb_group)
 
         # Servicios
         self.srv_add = self.create_service(LocationsServer, 'known_location_add', self.callback_add)
         self.srv_update = self.create_service(LocationsServer, 'update_yaml_interactive', self.callback_update)  # placeholder
         self.srv_get = self.create_service(LocationsGet, 'known_location_get', self.callback_get)
-        self.srv_goal = self.create_service(LocationsServer, 'known_location_goal', self.callback_goal)
+        self.srv_goal = self.create_service(LocationsServer, 'known_location_goal', self.callback_goal, callback_group=self._cb_group)
 
         self._cv = threading.Condition()
         self._goal_finished = False
@@ -202,15 +205,16 @@ class KnownLocationsServer(Node):
         return df
     
     def callback_status_nav(self, msg: GoalStatus):
+        self.get_logger().info(f"[STATUS] code={msg.status} text='{msg.text}'")
         with self._cv:
             self._last_status = msg.status
             self._last_text = msg.text
 
-            if msg.status == GoalStatus.STATUS_SUCCEEDED or msg.status == 3:
+            if msg.status == 3:
                 self._goal_finished = True
                 self._goal_succeeded = True
                 self._cv.notify_all()
-            elif msg.status == GoalStatus.STATUS_ABORTED or msg.status == 4:
+            elif msg.status == 4:
                 self._goal_finished = True
                 self._goal_succeeded = False
                 self._cv.notify_all()
@@ -313,7 +317,8 @@ class KnownLocationsServer(Node):
                         self.get_logger().warn("Timeout esperando GoalStatus de navegación")
                         resp.success = False
                         return resp
-
+                    
+                    self.get_logger().info("Before wait (cv)")
                     # Espera (libera el lock mientras tanto)
                     self._cv.wait(timeout=remaining)
 
