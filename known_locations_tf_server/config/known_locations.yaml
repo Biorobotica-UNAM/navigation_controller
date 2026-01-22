@@ -6,7 +6,7 @@ beverage_area:
 - qy: 0.0
 - qz: 0.005
 - qw: 0.999
-carry:
+living_room:
 - x: 6.065
 - y: 3.133
 - theta: 3.093
