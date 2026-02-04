@@ -105,12 +105,12 @@ class KnownLocationsServer(Node):
         self._last_text = ""
 
         # Al iniciar: leer YAML, republicar TF estáticas
-        self.df = self.yaml_to_df()
-        if not self.df.empty:
-            for i in range(len(self.df)):
-                x, y = float(self.df['x'].iloc[i]), float(self.df['y'].iloc[i])
-                qx, qy, qz, qw = [float(v) for v in self.df[['qx','qy','qz','qw']].iloc[i].values]
-                child = str(self.df['child_id_frame'].iloc[i])
+        self.dict = self.yaml_to_dict()
+        if self.dict:
+            for name, data in self.dict.items():
+                x, y = float(data['x']), float(data['y'])
+                qx, qy, qz, qw = [float(v) for v in [data['qx'], data['qy'], data['qz'], data['qw']]]
+                child = name
 
                 t = self.write_tf([x, y, 0.0], [qx, qy, qz, qw], child)
                 self.tf_static_broadcaster.sendTransform(t)
