@@ -1,6 +1,0 @@
-string location_name
----
-bool success
-string message
-geometry_msgs/Pose pose
-
