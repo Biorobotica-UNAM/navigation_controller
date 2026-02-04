@@ -17,7 +17,6 @@ import tf_transformations as tf
 import tf2_ros
 import yaml
 import numpy as np
-import pandas as pd
 
 from known_locations_interfaces.srv import LocationsServer, LocationsGet
 # LocationsServer.srv:
@@ -158,16 +157,15 @@ class KnownLocationsServer(Node):
         if con is None:
             con = {}
 
-        data = [
-            dict(x=round(float(pose[0]), 3)),
-            dict(y=round(float(pose[1]), 3)),
-            dict(theta=round(float(tf.euler_from_quaternion(quat)[2]), 3)),
-            dict(qx=round(float(quat[0]), 3)),
-            dict(qy=round(float(quat[1]), 3)),
-            dict(qz=round(float(quat[2]), 3)),
-            dict(qw=round(float(quat[3]), 3)),
-        ]
-        con[name] = data
+        con[name] = {
+            'x': round(float(pose[0]), 3),
+            'y': round(float(pose[1]), 3),
+            'theta': round(float(tf.euler_from_quaternion(quat)[2]), 3),
+            'qx': round(float(quat[0]), 3),
+            'qy': round(float(quat[1]), 3),
+            'qz': round(float(quat[2]), 3),
+            'qw': round(float(quat[3]), 3)
+        }
 
         # Escritura atómica
         os.makedirs(os.path.dirname(self.yaml_path), exist_ok=True)
@@ -184,25 +182,13 @@ class KnownLocationsServer(Node):
                     pass
         return True
 
-    def yaml_to_df(self):
+    def yaml_to_dict(self):
         con = self.read_yaml()
         if not con:
-            return pd.DataFrame()
+            return {}
 
-        values = []
-        locations = []
-        for c in con:
-            locations.append(c)
-            for i in range(len(con[c])):  # lista de 7 dicts
-                values.append(list(con[c][i].values())[0])
-
-        if len(values) == 0:
-            return pd.DataFrame()
-
-        data = np.array(values, dtype=float).reshape((int(len(values) / 7), 7))
-        df = pd.DataFrame(data, columns=['x', 'y', 'th', 'qx', 'qy', 'qz', 'qw'])
-        df['child_id_frame'] = locations
-        return df
+        # Devuelve el diccionario tal como está en el YAML
+        return con
     
     def callback_status_nav(self, msg: GoalStatus):
         self.get_logger().info(f"[STATUS] code={msg.status} text='{msg.text}'")
@@ -247,22 +233,21 @@ class KnownLocationsServer(Node):
         return resp
 
     def _lookup_pose_by_name(self, name: str):
-        df = self.yaml_to_df()
-        if df.empty:
-            return None, False
-        loc = df[df['child_id_frame'] == name]
-        if loc.empty:
+        yaml_data = self.yaml_to_dict()
+        if name not in yaml_data:
             return None, False
 
+        loc = yaml_data[name]
         pose = Pose()
-        pose.position.x = float(loc['x'].iloc[0])
-        pose.position.y = float(loc['y'].iloc[0])
+        pose.position.x = loc['x']
+        pose.position.y = loc['y']
         pose.position.z = 0.0
-        pose.orientation.x = float(loc['qx'].iloc[0])
-        pose.orientation.y = float(loc['qy'].iloc[0])
-        pose.orientation.z = float(loc['qz'].iloc[0])
-        pose.orientation.w = float(loc['qw'].iloc[0])
+        pose.orientation.x = loc['qx']
+        pose.orientation.y = loc['qy']
+        pose.orientation.z = loc['qz']
+        pose.orientation.w = loc['qw']
         return pose, True
+
 
     def callback_get(self, req, _resp=None):
         resp = LocationsGet.Response()
