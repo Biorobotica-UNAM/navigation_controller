@@ -12,7 +12,7 @@
   <depend>rclcpp</depend>
   <depend>geometry_msgs</depend>
   <depend>nav2_msgs</depend>
-  <depend>action_msgs</depend>
+  <depend>actionlib_msgs</depend>
   <depend>std_srvs</depend>
   <depend>known_locations_interfaces</depend>
 
