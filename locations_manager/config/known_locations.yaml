@@ -14,14 +14,6 @@ door:
   theta: -1.57
   x: 9.729
   y: 2.838
-entrance:
-  qw: 0.999
-  qx: 0.0
-  qy: 0.0
-  qz: -0.034
-  theta: -0.069
-  x: 0.568
-  y: 0.106
 kitchen:
   qw: -0.027
   qx: 0.0
