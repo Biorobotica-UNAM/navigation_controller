@@ -7,6 +7,16 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 
+import numpy as np
+
+if not hasattr(np, "maximum_sctype"):
+    def maximum_sctype(t):
+        return np.float64
+    np.maximum_sctype = maximum_sctype
+
+if not hasattr(np, "float"):
+    np.float = float
+
 import tf_transformations as tf
 import tf2_ros
 
