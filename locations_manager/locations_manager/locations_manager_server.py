@@ -22,7 +22,7 @@ import tf2_ros
 
 from geometry_msgs.msg import TransformStamped, Pose
 
-from known_locations_interfaces.srv import LocationsServer, LocationsGet
+from known_locations_interfaces.srv import LocationsServer, LocationsGet, SavePoseLocation
 
 # LocationsServer.srv:
 # string location_name
@@ -113,6 +113,14 @@ class LocationsManagerServer(Node):
             'locations_manager/get',
             self.handler_get_known_loc
         )
+
+
+        self.srv_save_new_loc = self.create_service(
+            SavePoseLocation,
+            'locations_manager/save',
+            self.handler_save_new_loc
+        )
+
 
         self.get_logger().info("Known locations server ready.")
 
@@ -285,6 +293,41 @@ class LocationsManagerServer(Node):
         self.get_logger().info(f"Returned location: {name}")
         return resp
 
+
+    def handler_save_new_loc(self, req, _resp=None):
+        resp = SavePoseLocation.Response()
+        resp.success = False
+
+        name = req.location_name
+        pose = req.pose
+
+        if not name:
+            self.get_logger().warn("Location name is empty.")
+            return resp
+
+        theta = tf.euler_from_quaternion([
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w
+        ])[2]
+
+        self.known_locations[name] = {
+            'x': pose.position.x,
+            'y': pose.position.y,
+            'theta': theta,
+            'qx': pose.orientation.x,
+            'qy': pose.orientation.y,
+            'qz': pose.orientation.z,
+            'qw': pose.orientation.w
+        }
+
+        self.append_known_loc_to_yaml()
+        self.publish_single_known_location(name, self.known_locations[name])
+
+        resp.success = True
+        self.get_logger().info(f"Saved new location: {name}")
+        return resp
 
 # ================= Main =================
 
