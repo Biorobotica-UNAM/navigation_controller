@@ -22,7 +22,7 @@ import tf2_ros
 
 from geometry_msgs.msg import TransformStamped, Pose
 
-from known_locations_interfaces.srv import LocationsServer, LocationsGet
+from known_locations_interfaces.srv import LocationsServer, LocationsGet, SavePoseLocation
 
 # LocationsServer.srv:
 # string location_name
@@ -113,6 +113,14 @@ class LocationsManagerServer(Node):
             'locations_manager/get',
             self.handler_get_known_loc
         )
+
+
+        self.srv_save_new_loc = self.create_service(
+            SavePoseLocation,
+            'locations_manager/save',
+            self.handler_save_new_loc
+        )
+
 
         self.get_logger().info("Known locations server ready.")
 
@@ -226,11 +234,17 @@ class LocationsManagerServer(Node):
         if not name:
             self.get_logger().warn("Location name is empty.")
             return resp
+        
+        self.get_logger().info(f"Calling save: {name}")
+        if self.save_location_from_buffer(name):
+            resp.success = True
+            self.get_logger().info(f"Added location from buffer: {name}")
+            return resp
 
         pose = self.get_robot_current_pose()
         if pose is None:
             return resp
-
+    
         theta = tf.euler_from_quaternion([
             pose.rotation.x,
             pose.rotation.y,
@@ -284,6 +298,104 @@ class LocationsManagerServer(Node):
 
         self.get_logger().info(f"Returned location: {name}")
         return resp
+
+
+    def handler_save_new_loc(self, req, _resp=None):
+        resp = SavePoseLocation.Response()
+        resp.success = False
+
+        name = req.location_name
+        pose = req.pose
+
+        if not name:
+            self.get_logger().warn("Location name is empty.")
+            return resp
+
+        theta = tf.euler_from_quaternion([
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w
+        ])[2]
+
+        self.known_locations[name] = {
+            'x': pose.position.x,
+            'y': pose.position.y,
+            'theta': theta,
+            'qx': pose.orientation.x,
+            'qy': pose.orientation.y,
+            'qz': pose.orientation.z,
+            'qw': pose.orientation.w
+        }
+
+        self.append_known_loc_to_yaml()
+        self.publish_single_known_location(name, self.known_locations[name])
+
+        resp.success = True
+        self.get_logger().info(f"Saved new location: {name}")
+        return resp
+    
+    def save_location_from_buffer(self, name):
+            """
+            Busca una transformación (TF) en el buffer usando el nombre proporcionado,
+            extrae su posición/orientación respecto al marco del mapa y la guarda en el YAML.
+            """
+            if not name:
+                self.get_logger().warn("save_location_from_buffer: El nombre recibido está vacío.")
+                return False
+
+            try:
+                # Buscamos la transformación del frame 'name' (ej. "customer") respecto a 'map'
+                # rclpy.time.Time() nos da la transformación más reciente disponible
+                trans = self.tf_buffer.lookup_transform(
+                    self.map_frame,
+                    name,
+                    rclpy.time.Time()
+                )
+                
+                # Extraemos de forma cómoda la traslación y rotación obtenidas
+                translation = trans.transform.translation
+                rotation = trans.transform.rotation
+
+                # Calculamos theta (Yaw) a partir del cuaternión para mantener tu estructura de datos
+                theta = tf.euler_from_quaternion([
+                    rotation.x,
+                    rotation.y,
+                    rotation.z,
+                    rotation.w
+                ])[2]
+
+                # Guardamos la localización en el diccionario usando el mismo formato del YAML
+                self.known_locations[name] = {
+                    'x': translation.x,
+                    'y': translation.y,
+                    'theta': theta,
+                    'qx': rotation.x,
+                    'qy': rotation.y,
+                    'qz': rotation.z,
+                    'qw': rotation.w
+                }
+
+                # Sincronizamos los cambios escribiendo en el archivo físico .yaml
+                self.append_known_loc_to_yaml()
+
+                # Volvemos a publicar la localización como estática (actualiza si ya existía)
+                self.publish_single_known_location(name, self.known_locations[name])
+
+                self.get_logger().info(f"Localización '{name}' extraída de TF y guardada con éxito en el YAML.")
+                return True
+
+            except tf2_ros.LookupException:
+                self.get_logger().error(f"No se pudo guardar '{name}': El frame no existe en el árbol de TF.")
+            except tf2_ros.ConnectivityException:
+                self.get_logger().error(f"No se pudo guardar '{name}': Error de conectividad en el árbol de TF.")
+            except tf2_ros.ExtrapolationException:
+                self.get_logger().error(f"No se pudo guardar '{name}': Error de extrapolación temporal en el buffer.")
+            except Exception as e:
+                self.get_logger().error(f"Error inesperado al intentar guardar desde el buffer: {e}")
+                
+            return False
+
 
 
 # ================= Main =================
