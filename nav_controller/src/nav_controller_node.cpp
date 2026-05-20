@@ -37,7 +37,7 @@ public:
     // The controller still lets motion_planner/simple_move replan internally,
     // but it now bounds the whole operation using the robot-goal map distance.
     this->declare_parameter<std::string>("map_frame", "map");
-    this->declare_parameter<std::string>("base_frame", "base_footprint");
+    this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<int>("base_timeout_seconds", 20);
     this->declare_parameter<int>("min_timeout_seconds", 45);
     this->declare_parameter<int>("max_timeout_seconds", 240);
