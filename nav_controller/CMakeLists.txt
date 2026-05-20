@@ -11,7 +11,10 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(actionlib_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(known_locations_interfaces REQUIRED)
 
 
@@ -24,6 +27,9 @@ ament_target_dependencies(nav_controller_node
   rclcpp
   geometry_msgs
   actionlib_msgs
+  std_msgs
+  tf2
+  tf2_ros
   known_locations_interfaces
 )
 
