@@ -33,9 +33,8 @@ public:
     goal_topic_         = "nav_control/goal";
     locations_get_srv_  = "locations_manager/get";
 
-    // Timeout policy for a complete semantic navigation request.
-    // The controller still lets motion_planner/simple_move replan internally,
-    // but it now bounds the whole operation using the robot-goal map distance.
+    // Parámetros para calcular un timeout de navegación proporcional a la distancia.
+    // Si no se configuran externamente, se usan valores conservadores por defecto.
     this->declare_parameter<std::string>("map_frame", "map");
     this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<int>("base_timeout_seconds", 20);
@@ -44,19 +43,6 @@ public:
     this->declare_parameter<double>("expected_speed_mps", 0.25);
     this->declare_parameter<double>("timeout_safety_factor", 3.0);
 
-    // Test-only hook for executor/supervisor error propagation checks.
-    // Keep disabled in normal runs. When enabled, a reserved semantic
-    // location can bypass locations_manager/get so tests can exercise the
-    // terminal navigation statuses below without depending on stored map
-    // locations. If test_location_publish_goal is false, the controller waits
-    // for an injected /navigation/status instead of sending a real nav goal.
-    this->declare_parameter<bool>("enable_test_location_bypass", false);
-    this->declare_parameter<std::string>("test_location_name", "__nav_test__");
-    this->declare_parameter<double>("test_location_x", 0.0);
-    this->declare_parameter<double>("test_location_y", 0.0);
-    this->declare_parameter<double>("test_location_z", 0.0);
-    this->declare_parameter<bool>("test_location_publish_goal", true);
-
     this->get_parameter("map_frame", map_frame_);
     this->get_parameter("base_frame", base_frame_);
     this->get_parameter("base_timeout_seconds", base_timeout_seconds_);
@@ -64,12 +50,6 @@ public:
     this->get_parameter("max_timeout_seconds", max_timeout_seconds_);
     this->get_parameter("expected_speed_mps", expected_speed_mps_);
     this->get_parameter("timeout_safety_factor", timeout_safety_factor_);
-    this->get_parameter("enable_test_location_bypass", enable_test_location_bypass_);
-    this->get_parameter("test_location_name", test_location_name_);
-    this->get_parameter("test_location_x", test_location_x_);
-    this->get_parameter("test_location_y", test_location_y_);
-    this->get_parameter("test_location_z", test_location_z_);
-    this->get_parameter("test_location_publish_goal", test_location_publish_goal_);
 
     // Callback groups para permitir concurrencia (servicio bloquea, sub sigue llegando)
     cbg_status_  = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
@@ -110,21 +90,6 @@ public:
     RCLCPP_INFO(this->get_logger(), "Sub status: %s", status_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Pub goal:   %s", goal_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Locations get: %s", locations_get_srv_.c_str());
-    if (enable_test_location_bypass_) {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "TEST MODE enabled: location '%s' bypasses %s and uses synthetic pose [%.2f, %.2f, %.2f]",
-        test_location_name_.c_str(),
-        locations_get_srv_.c_str(),
-        test_location_x_,
-        test_location_y_,
-        test_location_z_);
-      if (!test_location_publish_goal_) {
-        RCLCPP_WARN(
-          this->get_logger(),
-          "TEST MODE: synthetic test location will not publish real navigation goals");
-      }
-    }
   }
 
 private:
@@ -147,28 +112,8 @@ private:
 
   static bool is_terminal_status(int status)
   {
-    // GoalStatus comes from the lower navigation stack through
-    // /navigation/status. The controller only completes its service when it
-    // receives a terminal state. Non-terminal states, such as PENDING,
-    // ACTIVE, PREEMPTING, and RECALLING, are progress/status updates.
-    //
-    // Terminal states handled here:
-    // - SUCCEEDED: the robot reached the accepted navigation goal.
-    // - ABORTED: execution started but navigation could not finish. Common
-    //   causes are no valid path, repeated path-tracking failure, blocked
-    //   goal, or a safety layer reporting that motion cannot continue.
-    // - REJECTED: the navigation stack refused the goal before executing it,
-    //   for example because the request was invalid for the planner.
-    // - PREEMPTED: an active goal was cancelled/replaced by a newer goal or
-    //   stop request after it had already started.
-    // - RECALLED: a pending goal was cancelled before it became active.
-    // - LOST: the lower-level action state can no longer be tracked; this is
-    //   rare, but it is terminal because the controller cannot know whether
-    //   the goal is still valid.
-    //
-    // Tests may inject the same statuses on /navigation/status. In test mode
-    // prefer test_location_publish_goal=false to avoid racing real planner
-    // statuses against the injected status.
+    // Estados terminales reportados por la navegación. Los estados de progreso
+    // como PENDING, ACTIVE, PREEMPTING y RECALLING solo actualizan diagnóstico.
     switch (status) {
       case actionlib_msgs::msg::GoalStatus::SUCCEEDED:
       case actionlib_msgs::msg::GoalStatus::PREEMPTED:
@@ -226,11 +171,8 @@ private:
     const double dy = goal_pose.position.y - current_pose.position.y;
     distance = std::sqrt(dx * dx + dy * dy);
 
-    // Distance-based upper bound:
-    // base + (straight-line distance / expected speed) * safety factor,
-    // clamped to configured min/max limits. Straight-line distance is a lower
-    // bound for path length, so the safety factor absorbs path curvature,
-    // replanning and temporary obstacle waits.
+    // Timeout estimado: base + tiempo de viaje esperado, con factor de seguridad.
+    // La distancia en línea recta es un mínimo; el factor cubre curvas, replaneo y esperas.
     const double speed = std::max(expected_speed_mps_, 0.05);
     const double travel_seconds = (distance / speed) * timeout_safety_factor_;
     int timeout_seconds =
@@ -252,25 +194,6 @@ private:
     return oss.str();
   }
 
-  bool should_use_test_location(const std::string & location_name) const
-  {
-    return enable_test_location_bypass_ && location_name == test_location_name_;
-  }
-
-  known_locations_interfaces::srv::LocationsGet::Response::SharedPtr build_test_location_response()
-  {
-    // Synthetic response used only by the test hook above. This deliberately
-    // does not register or modify persistent locations.
-    auto response = std::make_shared<known_locations_interfaces::srv::LocationsGet::Response>();
-    response->success = true;
-    response->message = "test location bypass";
-    response->pose.position.x = test_location_x_;
-    response->pose.position.y = test_location_y_;
-    response->pose.position.z = test_location_z_;
-    response->pose.orientation.w = 1.0;
-    return response;
-  }
-
   // ===== Status callback =====
   void nav_status_cb(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
   {
@@ -278,14 +201,14 @@ private:
     last_status_code_ = msg->status;
     last_status_text_ = msg->text;
 
+    // Si no estamos esperando resultado o no es terminal, solo conservar diagnóstico.
     if (!waiting_nav_result_.load() || !is_terminal_status(msg->status)) {
       return;
     }
 
+    // Nota: esto asume que el status que llega corresponde al goal más reciente.
     nav_done_ = true;
     nav_success_ = (msg->status == actionlib_msgs::msg::GoalStatus::SUCCEEDED);
-    // Preserve the planner text so Navigation::GoToDetailed and GoTo can
-    // forward the actionable reason to the executor/supervisor.
     nav_result_status_code_ = msg->status;
     nav_result_status_text_ = msg->text;
     nav_cv_.notify_all();
@@ -304,53 +227,39 @@ private:
       return;
     }
 
-    known_locations_interfaces::srv::LocationsGet::Response::SharedPtr location_res;
+    if (!location_get_client_->wait_for_service(1s)) {
+      resp->message = "locations_manager/get service not available";
+      return;
+    }
 
-    const bool using_test_location = should_use_test_location(req->location_name);
+    // 1) Pedir pose al locations_get
+    auto loc_req = std::make_shared<known_locations_interfaces::srv::LocationsGet::Request>();
+    loc_req->location_name = req->location_name;
 
-    if (using_test_location) {
-      location_res = build_test_location_response();
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Using synthetic test location '%s'; %s was not called",
-        req->location_name.c_str(),
-        locations_get_srv_.c_str());
-    } else {
-      if (!location_get_client_->wait_for_service(1s)) {
-        resp->message = "locations_manager/get service not available";
-        return;
-      }
+    auto future = location_get_client_->async_send_request(loc_req);
 
-      // 1) Pedir pose al locations_get
-      auto loc_req = std::make_shared<known_locations_interfaces::srv::LocationsGet::Request>();
-      loc_req->location_name = req->location_name;
+    // OJO: aquí NO bloqueas el executor; esto espera la respuesta del servicio de locations.
+    // MultiThreadedExecutor lo maneja bien.
+    auto status = future.wait_for(5s);
+    if (status != std::future_status::ready) {
+      resp->message = "Timeout/failed calling locations_manager/get";
+      return;
+    }
 
-      auto future = location_get_client_->async_send_request(loc_req);
-
-      // OJO: aquí NO bloqueas el executor; esto espera la respuesta del servicio de locations.
-      // MultiThreadedExecutor lo maneja bien.
-      auto status = future.wait_for(5s);
-      if (status != std::future_status::ready) {
-        resp->message = "Timeout/failed calling locations_manager/get";
-        return;
-      }
-
-      location_res = future.get();
-      if (!location_res->success) {
-        resp->message = "locations_manager/get: " + location_res->message;
-        return;
-      }
+    auto location_res = future.get();
+    if (!location_res->success) {
+      resp->message = "locations_manager/get: " + location_res->message;
+      return;
     }
 
     // 2) Preparar goal
     geometry_msgs::msg::PoseStamped goal_msg;
     goal_msg.header.stamp = this->now();
-    goal_msg.header.frame_id = "map";
+    goal_msg.header.frame_id = map_frame_;
     goal_msg.pose = location_res->pose;
 
-    // 3) Compute timeout before publishing the goal. If the robot TF is
-    // missing, fail fast: without the current robot pose the controller cannot
-    // estimate progress or produce a meaningful navigation timeout.
+    // 3) Calcular timeout con la distancia actual robot-goal antes de publicar.
+    // Si no existe TF, se falla antes para no dejar una navegación sin límite claro.
     double estimated_distance = -1.0;
     std::string timeout_error;
     const auto timeout = compute_navigation_timeout(
@@ -385,17 +294,10 @@ private:
     waiting_nav_result_.store(true);
 
     // 5) Publicar goal
-    if (!using_test_location || test_location_publish_goal_) {
-      goal_pub_->publish(goal_msg);
-      RCLCPP_INFO(this->get_logger(), "Goal published for '%s' [%.2f, %.2f]",
-                  req->location_name.c_str(),
-                  goal_msg.pose.position.x, goal_msg.pose.position.y);
-    } else {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "TEST MODE: not publishing nav_control/goal for synthetic location '%s'",
-        req->location_name.c_str());
-    }
+    goal_pub_->publish(goal_msg);
+    RCLCPP_INFO(this->get_logger(), "Goal published for '%s' [%.2f, %.2f]",
+                req->location_name.c_str(),
+                goal_msg.pose.position.x, goal_msg.pose.position.y);
 
     // 6) Esperar status final (bloqueante)
     bool finished = false;
@@ -455,12 +357,6 @@ private:
   int max_timeout_seconds_{240};
   double expected_speed_mps_{0.25};
   double timeout_safety_factor_{3.0};
-  bool enable_test_location_bypass_{false};
-  std::string test_location_name_{"__nav_test__"};
-  double test_location_x_{0.0};
-  double test_location_y_{0.0};
-  double test_location_z_{0.0};
-  bool test_location_publish_goal_{true};
 
   rclcpp::CallbackGroup::SharedPtr cbg_status_;
   rclcpp::CallbackGroup::SharedPtr cbg_service_;
