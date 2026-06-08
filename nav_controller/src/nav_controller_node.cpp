@@ -75,12 +75,14 @@ public:
     location_get_client_ = this->create_client<known_locations_interfaces::srv::LocationsGet>(locations_get_srv_);
 
     // ===== Service go_to_location =====
-  
+    // Guys, please. Make sure the code compiles with ROS 2 Humble too. We talked about this!!!
+    //const rclcpp::QoS qos = rclcpp::ServicesQoS();
+    const rmw_qos_profile_t qos = rmw_qos_profile_services_default;
 
     go_to_location_srv_ = this->create_service<known_locations_interfaces::srv::LocationsGet>(
       "nav_controller/go_to_location",
       std::bind(&NavControllerNode::handle_go_to_location, this, std::placeholders::_1, std::placeholders::_2),
-      rclcpp::ServicesQoS(),
+      qos,
       cbg_service_
     );
 
