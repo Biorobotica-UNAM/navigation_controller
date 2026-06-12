@@ -13,7 +13,7 @@
 #include "actionlib_msgs/msg/goal_status.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "known_locations_interfaces/srv/locations_get.hpp"
-#include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "tf2/exceptions.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
@@ -39,7 +39,7 @@ public:
     this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<int>("base_timeout_seconds", 20);
     this->declare_parameter<int>("min_timeout_seconds", 45);
-    this->declare_parameter<int>("max_timeout_seconds", 240);
+    this->declare_parameter<int>("max_timeout_seconds", 180);
     this->declare_parameter<double>("expected_speed_mps", 0.25);
     this->declare_parameter<double>("timeout_safety_factor", 3.0);
 
@@ -67,8 +67,15 @@ public:
 
     // ===== Pub goal =====
     goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(goal_topic_, rclcpp::QoS(10));
-    stop_pub_ = this->create_publisher<std_msgs::msg::Bool>(
-      "/navigation/navigation_ctrl/stop",
+    goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+      goal_topic_, rclcpp::QoS(10),
+      std::bind(&NavControllerNode::external_goal_cb, this, std::placeholders::_1),
+      sub_opts
+    );
+
+    // ===== Pub stop ===== (Before was a Bool, i changed to Empty -> Josh)
+    stop_pub_ = this->create_publisher<std_msgs::msg::Empty>(
+      "/navigation/stop",
       rclcpp::QoS(10));
 
     // ===== Client locations_get =====
@@ -196,8 +203,76 @@ private:
     return oss.str();
   }
 
+  void cancel_goal_timeout()
+  {
+    if (goal_timeout_timer_) {
+      goal_timeout_timer_->cancel();
+      goal_timeout_timer_.reset();
+    }
+  }
+
+  void handle_goal_timeout()
+  {
+    std::lock_guard<std::mutex> lk(nav_mtx_);
+    if (!waiting_nav_result_.load() || nav_done_) {
+      return;
+    }
+
+    waiting_nav_result_.store(false);
+    nav_done_ = true;
+    nav_success_ = false;
+    nav_result_status_code_ = actionlib_msgs::msg::GoalStatus::ABORTED;
+    nav_result_status_text_ = "Navigation timed out";
+    cancel_goal_timeout();
+
+    std_msgs::msg::Empty stop_msg;
+    stop_pub_->publish(stop_msg);
+
+    RCLCPP_WARN(this->get_logger(), "External navigation goal timed out; publishing /navigation/stop.");
+  }
+
+  void external_goal_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    if (waiting_nav_result_.load()) {
+      RCLCPP_DEBUG(this->get_logger(), "External goal ignored because a service goal is active.");
+      return;
+    }
+
+    double estimated_distance = -1.0;
+    std::string timeout_error;
+    const auto timeout = compute_navigation_timeout(msg->pose, estimated_distance, timeout_error);
+    if (!timeout_error.empty()) {
+      RCLCPP_WARN(this->get_logger(), "Cannot compute timeout for external goal: %s", timeout_error.c_str());
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(nav_mtx_);
+      nav_done_ = false;
+      nav_success_ = false;
+      last_status_code_ = -1;
+      last_status_text_.clear();
+      nav_result_status_code_ = -1;
+      nav_result_status_text_.clear();
+    }
+
+    waiting_nav_result_.store(true);
+    cancel_goal_timeout();
+    goal_timeout_timer_ = this->create_wall_timer(
+      timeout,
+      std::bind(&NavControllerNode::handle_goal_timeout, this)
+    );
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "External goal received on '%s': timeout %ld s, distance %.2f m",
+      goal_topic_.c_str(),
+      timeout.count(),
+      estimated_distance);
+  }
+
   // ===== Status callback =====
-  void nav_status_cb(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
+  /*void nav_status_cb(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lk(nav_mtx_);
     last_status_code_ = msg->status;
@@ -214,7 +289,61 @@ private:
     nav_result_status_code_ = msg->status;
     nav_result_status_text_ = msg->text;
     nav_cv_.notify_all();
+    RCLCPP_INFO(this->get_logger(), "Received navigation result: %s", build_status_message("", msg->status, msg->text).c_str());
+  }*/
+
+  void nav_status_cb(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
+  {
+  std::lock_guard<std::mutex> lk(nav_mtx_);
+
+  const bool waiting = waiting_nav_result_.load();
+  const bool terminal = is_terminal_status(msg->status);
+
+  last_status_code_ = msg->status;
+  last_status_text_ = msg->text;
+
+  if (
+    msg->status != last_logged_status_code_ ||
+    msg->text != last_logged_status_text_ ||
+    waiting != last_logged_waiting_state_)
+  {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Navigation status%s: [%s]%s%s",
+      waiting ? " (service goal)" : " (external/RViz goal)",
+      status_name(msg->status),
+      msg->text.empty() ? "" : ": ",
+      msg->text.c_str());
+
+    last_logged_status_code_ = msg->status;
+    last_logged_status_text_ = msg->text;
+    last_logged_waiting_state_ = waiting;
   }
+
+  // If planner reports repeated replans failure, always request a stop.
+  if (msg->status == actionlib_msgs::msg::GoalStatus::ABORTED &&
+      msg->text.find("repeated_replans_same_start") != std::string::npos) {
+    std_msgs::msg::Empty stop_msg;
+    stop_pub_->publish(stop_msg);
+    RCLCPP_WARN(this->get_logger(), "Published /navigation/stop due to repeated replans reported by planner.");
+  }
+
+  if (!waiting || !terminal) {
+    return;
+  }
+
+  cancel_goal_timeout();
+  nav_done_ = true;
+  nav_success_ = (msg->status == actionlib_msgs::msg::GoalStatus::SUCCEEDED);
+  nav_result_status_code_ = msg->status;
+  nav_result_status_text_ = msg->text;
+  nav_cv_.notify_all();
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Received navigation result for service goal: %s",
+    build_status_message("", msg->status, msg->text).c_str());
+}
 
   // ===== Service handler: go_to_location =====
   void handle_go_to_location(
@@ -318,8 +447,8 @@ private:
     waiting_nav_result_.store(false);
 
     if (!finished) {
-      std_msgs::msg::Bool stop_msg;
-      stop_msg.data = true;
+      std_msgs::msg::Empty stop_msg;
+      //stop_msg.data = true;
       stop_pub_->publish(stop_msg);
 
       std::ostringstream oss;
@@ -364,13 +493,15 @@ private:
   rclcpp::CallbackGroup::SharedPtr cbg_service_;
 
   rclcpp::Subscription<actionlib_msgs::msg::GoalStatus>::SharedPtr status_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stop_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr stop_pub_;
   rclcpp::Client<known_locations_interfaces::srv::LocationsGet>::SharedPtr location_get_client_;
 
   rclcpp::Service<known_locations_interfaces::srv::LocationsGet>::SharedPtr go_to_location_srv_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
+  rclcpp::TimerBase::SharedPtr goal_timeout_timer_;
 
   // Estado navegación
   std::atomic<bool> waiting_nav_result_{false};
@@ -383,6 +514,10 @@ private:
   std::string last_status_text_;
   int nav_result_status_code_{-1};
   std::string nav_result_status_text_;
+
+  int last_logged_status_code_{-999};
+  std::string last_logged_status_text_;
+  bool last_logged_waiting_state_{false};
 };
 
 int main(int argc, char ** argv)
