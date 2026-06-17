@@ -348,7 +348,8 @@ class LocationsManagerServer(Node):
             trans = self.tf_buffer.lookup_transform(
                 self.map_frame,
                 name,
-                rclpy.time.Time()
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=2.0)
             )
             translation = trans.transform.translation
             rotation = trans.transform.rotation
