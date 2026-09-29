@@ -204,11 +204,28 @@ private:
     last_status_text_ = msg->text;
 
     // Si no estamos esperando resultado o no es terminal, solo conservar diagnóstico.
-    if (!waiting_nav_result_.load() || !is_terminal_status(msg->status)) {
+    if (!waiting_nav_result_.load()) {
       return;
     }
 
-    // Nota: esto asume que el status que llega corresponde al goal más reciente.
+    if (msg->status == actionlib_msgs::msg::GoalStatus::ACTIVE) {
+      seen_active_status_for_current_goal_ = true;
+      return;
+    }
+
+    if (!is_terminal_status(msg->status)) {
+      return;
+    }
+
+    if (!seen_active_status_for_current_goal_) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Ignoring terminal navigation status before current goal became ACTIVE: [%s] %s",
+        status_name(msg->status),
+        msg->text.c_str());
+      return;
+    }
+
     nav_done_ = true;
     nav_success_ = (msg->status == actionlib_msgs::msg::GoalStatus::SUCCEEDED);
     nav_result_status_code_ = msg->status;
@@ -292,6 +309,7 @@ private:
       last_status_text_.clear();
       nav_result_status_code_ = -1;
       nav_result_status_text_.clear();
+      seen_active_status_for_current_goal_ = false;
     }
     waiting_nav_result_.store(true);
 
@@ -378,6 +396,7 @@ private:
   std::condition_variable nav_cv_;
   bool nav_done_{false};
   bool nav_success_{false};
+  bool seen_active_status_for_current_goal_{false};
 
   int last_status_code_{-1};
   std::string last_status_text_;
