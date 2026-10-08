@@ -28,6 +28,8 @@ from known_locations_interfaces.srv import (
     SavePoseLocation
 )
 
+from ament_index_python.packages import get_package_share_directory
+
 # LocationsServer.srv:
 # string location_name
 # ---
@@ -55,11 +57,35 @@ def _repo_root_from_this_file(
     return p.parent
 
 
-def _pkg_yaml_abs_path(rel_path: str) -> str:
+def _resolve_locations_yaml_path(file_name: str) -> str:
+    # 1. Si ya es una ruta absoluta existente, respetarla
+    if os.path.isabs(file_name) and os.path.exists(file_name):
+        return file_name
+
+    # 2. Buscar en share del paquete instalado (estándar oficial de ROS 2)
+    try:
+        pkg_share = get_package_share_directory('locations_manager')
+        candidate = os.path.join(pkg_share, 'config', file_name)
+        if os.path.exists(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # 3. Fallback buscando respecto a la raíz del paquete/código fuente
     root = _repo_root_from_this_file()
-    path = (root / rel_path.lstrip('/')).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return str(path)
+    fallback = (root / 'config' / file_name).resolve()
+    if fallback.exists():
+        return str(fallback)
+
+    # 4. Si aún no existe el archivo, usar la ruta del share si está disponible
+    try:
+        pkg_share = get_package_share_directory('locations_manager')
+        target = Path(pkg_share) / 'config' / file_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return str(target)
+    except Exception:
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return str(fallback)
 
 
 class LocationsManagerServer(Node):
@@ -146,17 +172,21 @@ class LocationsManagerServer(Node):
 
     def load_known_locations(self, file_name):
 
-        yaml_path = _pkg_yaml_abs_path(
-            f'config/{file_name}'
-        )
+        yaml_path = _resolve_locations_yaml_path(file_name)
 
         if not os.path.exists(yaml_path):
+            self.get_logger().warn(
+                f"Locations file not found at {yaml_path}, initializing default."
+            )
             self.initialize_yaml(yaml_path)
 
         with open(yaml_path, 'r') as f:
             self.known_locations = yaml.safe_load(f) or {}
 
         self.yaml_path = yaml_path
+        self.get_logger().info(
+            f"Loaded {len(self.known_locations)} locations from {yaml_path}"
+        )
 
     def initialize_yaml(self, file_path):
 
