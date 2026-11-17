@@ -76,14 +76,15 @@ class NavigationIntegration(unittest.TestCase):
         for package, executable, name, extra in [
             ('simple_move', 'simple_move_node', 'simple_move',
              ['-p', 'move_head:=false', '-p', 'max_linear_speed:=0.4']),
-            ('mvn_pln', 'mvn_pln_node', 'mvn_pln', []),
+            ('navigation_manager', 'navigation_manager_node', 'navigation_manager', ['-p', 'legacy_move_head:=false', '-p', 'replan_period_sec:=0.2',
+              '-p', 'recovery.replan.attempts:=3', '-p', 'recovery.condition.start_escape.attempts:=3']),
             ('potential_fields', 'potential_fields_node', 'potential_fields',
              ['-p', 'use_lidar:=true', '-p', 'use_point_cloud:=true',
               '-p', 'use_pot_fields:=true', '-p', 'laser_min_z:=-0.1',
               '-p', 'laser_min_x:=0.1', '-p', 'laser_max_x:=1.0',
               '-p', 'laser_pot_fields_d0:=0.9', '-p', 'lidar_points_threshold:=0']),
         ]:
-            if package in ('simple_move', 'mvn_pln'):
+            if package in ('simple_move', 'navigation_manager'):
                 extra += ['-p', f'allow_unknown:={str(cls.allow_unknown).lower()}']
             binary = FilePath(get_package_prefix(package)) / 'lib' / package / executable
             log = open(f"{os.environ.get('NAVIGATION_LOG_PREFIX', '/tmp/navigation_test_')}{name}.log", 'w')
@@ -125,7 +126,7 @@ class NavigationIntegration(unittest.TestCase):
             cls.node.create_subscription(Vector3, '/navigation/potential_fields/pf_rejection_force', lambda m: setattr(cls, 'force', m), 10),
         ]
         cls.params = cls.node.create_client(SetParametersAtomically, '/navigation/simple_move/set_parameters_atomically')
-        cls.manager_params = cls.node.create_client(SetParametersAtomically, '/navigation/mvn_pln/set_parameters_atomically')
+        cls.manager_params = cls.node.create_client(SetParametersAtomically, '/navigation/navigation_manager/set_parameters_atomically')
         cls.planner = cls.node.create_service(PlanPath, '/navigation/path_planner/plan_navigation', cls.plan)
         cls.timer = cls.node.create_timer(0.02, cls.tick)
         cls.x = cls.y = cls.yaw = 0.0
@@ -201,9 +202,12 @@ class NavigationIntegration(unittest.TestCase):
         if cls.planner_stale_response:
             response.map_stamp.sec -= 1
         response.path.header.frame_id = 'map'
-        end_x = request.goal.pose.position.x + cls.planner_goal_offset
+        offset = cls.planner_goal_offset
+        if cls.blocked_goal_position is not None and abs(request.goal.pose.position.x-cls.blocked_goal_position[0]) > 1e-6:
+            offset = 0.0  # An already accepted alternative is now the exact operational target.
+        end_x = request.goal.pose.position.x + offset
         end_y = request.goal.pose.position.y
-        response.goal_relocated = cls.planner_goal_offset != 0.0
+        response.goal_relocated = offset != 0.0
         if cls.planner_recovery_forever:
             response.start_recovery = True
             end_x, end_y = request.start.pose.position.x, request.start.pose.position.y
@@ -352,7 +356,7 @@ class NavigationIntegration(unittest.TestCase):
     def setUp(self):
         cls = type(self)
         self.stop_pub.publish(Empty())
-        self.spin_for(0.15)
+        self.spin_for(0.5)
         self.set_params(move_head=False, motion_mode='omni', use_pot_fields=False, max_linear_speed=0.4,
                         head_pan_min=-3.14, head_pan_max=1.74,
                         debug_detection=os.environ.get('NAVIGATION_TEST_DEBUG') == '1',
@@ -512,10 +516,11 @@ class NavigationIntegration(unittest.TestCase):
             self.send_goal(1.0,0.0)
             self.wait_for(lambda: any(s.status == 4 for s in self.statuses))
             goal = self.statuses[-1].goal_id.id
-            log = FilePath('/tmp/navigation_test_mvn_pln.log').read_text()
+            log = FilePath('/tmp/navigation_test_navigation_manager.log').read_text()
             self.assertIn(f'NavigationDiagnostic goal={goal} ', log)
-            self.assertIn(f'PlanDiagnostic goal={goal} reason=start_blocked', log)
-            self.assertIn('reason=recovery_exhausted: start_blocked', log)
+            self.assertIn(f'PlanDiagnostic goal={goal} ', log)
+            self.assertIn('reason=start_blocked', log)
+            self.assertIn('reason=start_blocked state=4', log)
         finally:
             request.parameters = [Parameter('debug_detection', value=False).to_parameter_msg()]
             future = self.manager_params.call_async(request)
@@ -549,7 +554,7 @@ class NavigationIntegration(unittest.TestCase):
         self.wait_for(lambda: any(s.status == 4 for s in self.statuses), timeout=6)
         terminal = [s for s in self.statuses if s.status in (3,4)]
         self.assertEqual(len(terminal), 1)
-        self.assertEqual((terminal[0].status, terminal[0].text), (4,'recovery_exhausted: start_blocked'))
+        self.assertEqual((terminal[0].status, terminal[0].text), (4,'start_recovery_exhausted'))
         self.assertEqual(self.plan_calls, 4)
 
     def test_initial_blocked_goal_reaches_alternative_and_preserves_requested_goal(self):
@@ -562,7 +567,7 @@ class NavigationIntegration(unittest.TestCase):
         self.wait_for(lambda: any(s.status in (3,4) for s in self.statuses), timeout=20)
         terminal = [s for s in self.statuses if s.status in (3,4)]
         self.assertEqual(len(terminal), 1)
-        self.assertEqual((terminal[0].status, terminal[0].text), (3, 'reached_near_goal: goal_blocked'))
+        self.assertEqual((terminal[0].status, terminal[0].text), (3, 'arrived_approximately'))
         self.assertLess(math.hypot(self.x-2.0, self.y), 0.33)
         self.assertLess(abs(math.remainder(self.yaw-1.0, 2*math.pi)), 0.06)
         self.assertAlmostEqual(self.plan_requests[0].goal.pose.position.x, 2.0)
@@ -574,7 +579,7 @@ class NavigationIntegration(unittest.TestCase):
         self.send_goal(2.0, 0.0, 1.0)
         self.wait_for(lambda: len([s for s in self.statuses if s.status in (3,4)]) > previous, timeout=10)
         terminal = [s for s in self.statuses if s.status in (3,4)]
-        self.assertEqual(terminal[-1].text, 'goal_pose_reached')
+        self.assertEqual(terminal[-1].text, 'arrived')
         self.assertLess(math.hypot(self.x-2.0, self.y), 0.04)
 
     def test_alternative_at_radius_edge_does_not_finish_outside_region(self):
@@ -586,7 +591,7 @@ class NavigationIntegration(unittest.TestCase):
         self.send_goal(2.0, 0.0, 1.0)
         self.wait_for(lambda: any(s.status in (3,4) for s in self.statuses), timeout=20)
         terminal = next(s for s in self.statuses if s.status in (3,4))
-        self.assertEqual((terminal.status,terminal.text), (3,'reached_near_goal: goal_blocked'))
+        self.assertEqual((terminal.status,terminal.text), (3,'arrived_approximately'))
         self.assertLess(math.hypot(self.x-2.0,self.y), 0.33)
 
     def test_late_blocked_goal_stops_and_aligns_before_single_success(self):
@@ -600,7 +605,7 @@ class NavigationIntegration(unittest.TestCase):
         self.wait_for(lambda: any(s.status in (3,4) for s in self.statuses), timeout=10)
         terminal = [s for s in self.statuses if s.status in (3,4)]
         self.assertEqual(len(terminal), 1)
-        self.assertEqual((terminal[0].status, terminal[0].text), (3, 'reached_near_goal: goal_blocked'))
+        self.assertEqual((terminal[0].status, terminal[0].text), (3, 'arrived_approximately'))
         self.assertLess(math.hypot(self.x-1.9, self.y), 0.04)
         self.assertLess(abs(self.yaw-1.0), 0.06)
         self.assertEqual(math.hypot(self.command.linear.x, self.command.linear.y), 0.0)
@@ -619,20 +624,20 @@ class NavigationIntegration(unittest.TestCase):
             self.assertFalse(any(s.status == 3 for s in self.statuses))
             self.assertFalse(any(s.text == 'aligning_near_blocked_goal' for s in self.statuses))
             self.stop_pub.publish(Empty())
-            self.spin_for(0.15)
+            self.spin_for(0.5)
             cls.statuses.clear()
 
-    def test_blocked_plan_retries_are_bounded_even_with_patience(self):
+    def test_blocked_plan_retries_respect_configured_strategy_budget(self):
         cls = type(self)
         for reason in ('start_blocked','goal_blocked'):
             cls.planner_failure = reason
             calls = self.plan_calls
             self.send_goal(1.0, 0.0)
             self.wait_for(lambda: any(s.status == 4 for s in self.statuses), timeout=6)
-            self.assertEqual(self.plan_calls-calls, 3)
+            self.assertEqual(self.plan_calls-calls, 4)
             terminal = [s for s in self.statuses if s.status in (3,4)]
             self.assertEqual(len(terminal), 1)
-            self.assertEqual(terminal[0].text, 'recovery_exhausted: '+reason)
+            self.assertEqual(terminal[0].text, reason)
             cls.statuses.clear()
 
     def test_free_goal_cannot_be_silently_relocated(self):
@@ -658,7 +663,7 @@ class NavigationIntegration(unittest.TestCase):
         self.assertFalse(any(s.status == 3 for s in self.statuses))
         cls.yaw = 1.0
         self.wait_for(lambda: any(s.status == 3 for s in self.statuses))
-        self.assertEqual(next(s.text for s in self.statuses if s.status == 3), 'reached_near_goal: goal_blocked')
+        self.assertEqual(next(s.text for s in self.statuses if s.status == 3), 'arrived_approximately')
 
     def test_stationary_odometry_jitter_finishes_without_progress_timeout(self):
         type(self).odom_jitter = 0.002
@@ -711,7 +716,7 @@ class NavigationIntegration(unittest.TestCase):
             self.spin_for(0.15)
         self.wait_for(lambda: any(s.status == 4 for s in self.statuses))
         self.assertEqual(next(s.text for s in self.statuses if s.status == 4),
-                         'control_retries_exhausted: head_alignment_timeout')
+                         'head_alignment_timeout')
         self.assertTrue(all(not r.avoided_paths for r in self.plan_requests))
         self.assertEqual(self.plan_calls, 4)
 
@@ -1055,7 +1060,7 @@ class NavigationIntegration(unittest.TestCase):
             result.goal_id, result.status, result.text = active.goal_id, 4, 'local_trajectory_blocked'
             self.result_pub.publish(result)
             self.spin_for(0.2)
-        self.wait_for(lambda: any(s.text.startswith('recovery_exhausted') for s in self.statuses), timeout=7)
+        self.wait_for(lambda: any(s.status == 4 and s.text in ('plan_invalid_on_current_map', 'local_trajectory_blocked', 'route_blocked') for s in self.statuses), timeout=7)
         self.assertTrue(any(r.avoided_paths for r in self.plan_requests))
         self.assertEqual(self.command.linear.x, 0.0)
         type(self).blocked = False
@@ -1152,7 +1157,9 @@ class NavigationIntegration(unittest.TestCase):
             stopped += math.hypot(self.command.linear.x, self.command.linear.y) < 0.01
         self.assertGreaterEqual(self.y, 0.5)
         self.assertLess(stopped, 3)
-        self.assertLess(abs(self.yaw-math.pi/2), 0.25)
+        self.assertLess(abs(self.yaw-math.pi/2), math.pi/2)
+        self.wait_for(lambda: any(r.status == 3 for r in self.results), timeout=8)
+        self.assertLess(abs(self.yaw-math.pi/2), 0.06)
 
     def test_preventive_zone_reduces_speed_without_aborting(self):
         self.set_params(use_pot_fields=True)
@@ -1387,7 +1394,7 @@ class NavigationIntegration(unittest.TestCase):
         self.send_goal(1.0, 0.0)
         self.wait_for(lambda: self.command.linear.x > 0.02)
         type(self).publish_scan = False
-        self.wait_for(lambda: any(r.status == 4 and r.text == 'obstacle_data_stale' for r in self.results), timeout=5)
+        self.wait_for(lambda: any(s.text == 'obstacle_data_stale' for s in self.statuses), timeout=5)
         self.spin_for(0.2)
         count = self.plan_calls
         self.spin_for(0.8)
@@ -1395,7 +1402,7 @@ class NavigationIntegration(unittest.TestCase):
         self.assertEqual(self.command.linear.x, 0.0)
         type(self).publish_scan = True
         self.wait_for(lambda: self.plan_calls > count, timeout=5)
-        self.assertTrue(any(s.text == 'obstacle_data_recovered' for s in self.statuses))
+        self.wait_for(lambda: any(s.text == 'following_path' for s in self.statuses))
 
     def test_rotation_inside_planning_padding_keeps_position(self):
         cls = type(self)

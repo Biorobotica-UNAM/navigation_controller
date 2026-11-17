@@ -45,6 +45,7 @@ class DepthNavigation(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.x = self.y = self.yaw = 0.0
         self.pan, self.tilt = 0.0, -0.6
+        self.reverse_head_feedback = False
         self.pitch, self.camera_height = None, 0.8
         self.cloud_in_base = False
         self.head_position = np.array([self.pan, self.tilt])
@@ -55,7 +56,7 @@ class DepthNavigation(unittest.TestCase):
         self.integrate = False
         self.raw_table = False
         self.world_points, self.sensor_points = [], None
-        self.statuses, self.trace, self.trajectories = [], [], []
+        self.statuses, self.trace, self.trajectories, self.head_requested_speeds = [], [], [], []
         self.obstacles = self.augmented = self.clearance = None
         self.last_depth = self.last_map = 0.0
         self.tf = TransformBroadcaster(self.node)
@@ -104,7 +105,7 @@ class DepthNavigation(unittest.TestCase):
                 '-p', 'head_goal_topic:='+self.ns+'/head_goal',
                 '-p', 'head_feedback_topic:='+self.ns+'/head_pose',
                 '-r', '/cmd_vel:='+self.ns+'/cmd']),
-            ('mvn_pln', 'mvn_pln_node', ['-p', 'base_link_name:=robot_base',
+            ('navigation_manager', 'navigation_manager_node', ['-p', 'motion_node:='+self.ns+'/simple_move_node', '-p', 'legacy_move_head:=false', '-p', 'base_link_name:=robot_base',
                 '-p', 'map_frame:=world', '-p', 'odom_name:=nav_odom',
                 '-r', '/nav_control/goal:='+self.ns+'/goal']),
             ('hsr_hardware', 'hsr_head_node', ['-p', 'head_goal_topic:='+self.ns+'/head_goal',
@@ -147,6 +148,7 @@ class DepthNavigation(unittest.TestCase):
         self.head_started = time.monotonic()
         duration = message.points[0].time_from_start
         self.head_duration = duration.sec+duration.nanosec*1e-9
+        self.head_requested_speeds.append(np.max(np.abs(self.head_to-self.head_from))/self.head_duration)
 
     def tick(self):
         now = time.monotonic()
@@ -159,9 +161,11 @@ class DepthNavigation(unittest.TestCase):
         self.head_position = self.head_from+(self.head_to-self.head_from)*phase
         self.pan, self.tilt = self.head_position
         state = JointTrajectoryControllerState()
-        # Use pan first: the former driver incorrectly assumed tilt first.
         state.joint_names = ['head_pan_joint', 'head_tilt_joint']
         state.actual.positions = [float(self.pan), float(self.tilt)]
+        if self.reverse_head_feedback:
+            state.joint_names.reverse()
+            state.actual.positions.reverse()
         self.head_state.publish(state)
         stamp = self.node.get_clock().now().to_msg()
         transforms = []
@@ -348,7 +352,27 @@ class DepthNavigation(unittest.TestCase):
             self.assertTrue(self.occupied(1.2, 0), pitch)
         self.node.destroy_publisher(evidence)
 
+    def test_head_feedback_uses_named_joint_order(self):
+        feedback = []
+        subscription = self.node.create_subscription(
+            Float64MultiArray, self.ns+'/head_pose', lambda m: feedback.append(list(m.data)), 10)
+        for reversed_order, target in ((False, [0.4, -0.3]), (True, [-0.35, 0.1])):
+            self.reverse_head_feedback = reversed_order
+            self.head_goal.publish(Float64MultiArray(data=target))
+            self.spin_for(2.0)
+            self.assertTrue(feedback)
+            self.assertLess(np.linalg.norm(np.array(feedback[-1])-self.head_position), 0.02)
+            self.assertLess(np.linalg.norm(self.head_position-np.array(target)), 0.06)
+        self.node.destroy_subscription(subscription)
+
     def test_non_aligned_motion_is_continuous_with_actual_head_node(self):
+        # The coordinator owns the requested head policy for a navigation goal.
+        manager = self.node.create_client(SetParametersAtomically, self.ns+'/navigation_manager/set_parameters_atomically')
+        policy = SetParametersAtomically.Request()
+        policy.parameters = [Parameter('legacy_move_head', value=True).to_parameter_msg()]
+        configured = manager.call_async(policy)
+        self.spin_for(0.3)
+        self.assertTrue(configured.done() and configured.result().result.successful)
         request = SetParametersAtomically.Request()
         request.parameters = [Parameter('move_head', value=True).to_parameter_msg()]
         future = self.params.call_async(request)
@@ -367,9 +391,9 @@ class DepthNavigation(unittest.TestCase):
         moving = [t for t in self.trace if 0.10 < t[1] < 1.80]
         self.assertTrue(moving)
         self.assertLess(sum(t[3] < 0.01 for t in moving), 3)
-        velocities = [np.array(t.points[0].velocities) for t in self.trajectories]
-        self.assertTrue(velocities)
-        self.assertLessEqual(max(np.max(np.abs(v)) for v in velocities), 1.5001)
+        self.assertTrue(self.trajectories)
+        # This driver commands positions and duration, without endpoint velocities.
+        self.assertLessEqual(max(self.head_requested_speeds), 1.5001)
 
     def test_person_seen_only_by_depth_is_avoided(self):
         goal = PoseStamped()

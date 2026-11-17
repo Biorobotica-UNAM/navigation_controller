@@ -116,7 +116,7 @@ class LaboratoryNavigation(unittest.TestCase):
                 '-p', 'laser_min_z:=-0.1', '-p', 'laser_pot_fields_d0:=0.75',
                 '-p', 'laser_pot_fields_k_rej:=0.4', '-p', 'lidar_points_threshold:=2',
                 '-r', '/cmd_vel:=/lab_cmd_vel']),
-            ('mvn_pln', 'mvn_pln_node', ['-p', 'goal_position_tolerance_m:=0.08',
+            ('navigation_manager', 'navigation_manager_node', ['-p', 'motion_node:=/lab_test/simple_move_node', '-p', 'legacy_move_head:=true', '-p', 'goal_position_tolerance_m:=0.08',
                 '-p', 'goal_angle_tolerance_rad:=0.08', '-r', '/nav_control/goal:=/lab_test/goal']),
         ]
         for package, executable, extra in configurations:
@@ -398,7 +398,7 @@ class LaboratoryNavigation(unittest.TestCase):
         self.navigate((-2.100, -3.139, -0.166), goal, timeout=20, approximate=True)
         terminal = [s for s in self.statuses if s.status in (3, 4)]
         self.assertEqual(len(terminal), 1)
-        self.assertEqual(terminal[0].text, 'reached_near_goal: goal_blocked')
+        self.assertEqual(terminal[0].text, 'arrived_approximately')
         self.assertGreaterEqual(math.hypot(self.x-goal[0], self.y-goal[1]), 0.28-1e-3)
         self.assertFalse(any('replanning:' in s.text and 'waiting_for_updated_map' not in s.text
                              for s in self.statuses))
@@ -535,7 +535,7 @@ class LaboratoryNavigation(unittest.TestCase):
         terminal = [s for s in self.statuses if s.status in (3,4)]
         self.assertEqual(len(terminal), 1, [(s.status,s.text) for s in self.statuses])
         self.assertEqual(terminal[0].status, 4)
-        self.assertTrue('planning_recovery_' in terminal[0].text, terminal[0].text)
+        self.assertIn(terminal[0].text, ('no_path', 'goal_blocked'))
         self.assertTrue(any(s.text == 'observing_blockage' for s in self.statuses))
 
 

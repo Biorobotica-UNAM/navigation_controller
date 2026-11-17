@@ -445,7 +445,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /move_base_simple/goal
+        Value: /nav_control/goal
     - Class: rviz_default_plugins/PublishPoint
       Single click: true
       Topic:
