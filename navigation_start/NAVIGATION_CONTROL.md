@@ -12,8 +12,12 @@ antes de despachar cualquier trayectoria. La percepción de obstáculos permanec
 El contexto pertenece a un objetivo y cada operación lleva su propia generación.
 La cancelación y sustitución invalidan respuestas pendientes, confirman que el controlador
 está inactivo y verifican reposo por odometría fresca antes de cerrar la ejecución.
-Un fallo de verificación de parada impide activar objetivos posteriores hasta reiniciar
-el coordinador y comprobar físicamente el estado del robot.
+Un fallo de verificación de parada bloquea las solicitudes de movimiento. El servicio
+`reset_fault` (`std_srvs/srv/Trigger`, en el mismo namespace que `navigate`) solicita
+una nueva parada y verifica una ventana de odometría fresca tras la confirmación de
+reposo del controlador. `success=true` indica que comenzó la verificación. El tópico
+`navigation_status` informa el resultado de la verificación y el bloqueo efectivo
+en `faulted`. El restablecimiento no reactiva metas anteriores.
 
 El monitor diagnostica geometría, percepción, localización y falta de progreso.
 Las estrategias seleccionan observación, espera o replanificación; los presupuestos
@@ -23,12 +27,21 @@ Las maniobras locales, colisión, escape acotado y frenado pertenecen a `simple_
 El éxito requiere pose final, tolerancia angular, seguridad y reposo, también cuando
 el planificador utiliza un destino alternativo dentro del radio permitido.
 
-Los clientes antiguos y las configuraciones de RViz publican poses en `/nav_control/goal`.
-`legacy_move_head` define su política de cabeza. `motion_node` identifica el nodo del
-controlador para aplicar y verificar su configuración (por defecto, `simple_move` en
-el espacio de nombres de navegación).
-`status` y `path` se conservan como salidas de compatibilidad y visualización.
-Los nuevos clientes deben usar la Action para cancelación y resultados correlacionados.
+El coordinador recibe poses en `/navigation/goal` y mantiene `/nav_control/goal`
+para los clientes y configuraciones de RViz existentes. `legacy_move_head` define
+la política de cabeza para ambos tópicos. El parámetro `motion_node` identifica el
+nodo del controlador. Su valor por defecto es `simple_move_node`, relativo al
+namespace del coordinador. Los launch lo configuran como `simple_move`.
+
+`navigation_status` (`navigation_manager/msg/NavigationStatus`) publica el estado
+inicial, el progreso y el resultado de metas de ambos orígenes. Usa QoS Reliable,
+Transient Local y Keep Last con profundidad 1. Durante una ejecución se actualiza
+a 5 Hz y ante cambios relevantes. La última instantánea queda disponible para
+suscriptores tardíos. `result_valid` indica si contiene un resultado terminal y
+`source` identifica el origen de la solicitud. Con la configuración por defecto
+de los launch, el tópico es `/navigation/navigation_status`. Se conserva
+`status` (`actionlib_msgs/msg/GoalStatus`) para consumidores existentes y
+`path` para visualización.
 
 Pruebas:
 

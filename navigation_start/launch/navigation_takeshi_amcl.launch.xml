@@ -584,6 +584,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="motion_node" value="simple_move"/>
     <param from="$(find-pkg-share navigation_manager)/config/navigation_manager.yaml"/>
     <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="odom_name" value="$(var odom_frame)"/>

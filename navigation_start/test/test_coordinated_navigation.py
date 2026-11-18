@@ -24,6 +24,7 @@ from rcl_interfaces.srv import SetParametersAtomically
 from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 from ament_index_python.packages import get_package_prefix
 from actionlib_msgs.msg import GoalStatus
+from navigation_manager.msg import NavigationStatus
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist, Vector3
 from nav_msgs.msg import OccupancyGrid, Path
 from nav_msgs.srv import GetMap
@@ -76,7 +77,7 @@ class NavigationIntegration(unittest.TestCase):
         for package, executable, name, extra in [
             ('simple_move', 'simple_move_node', 'simple_move',
              ['-p', 'move_head:=false', '-p', 'max_linear_speed:=0.4']),
-            ('navigation_manager', 'navigation_manager_node', 'navigation_manager', ['-p', 'legacy_move_head:=false', '-p', 'replan_period_sec:=0.2',
+            ('navigation_manager', 'navigation_manager_node', 'navigation_manager', ['-p', 'motion_node:=simple_move', '-p', 'legacy_move_head:=false', '-p', 'replan_period_sec:=0.2',
               '-p', 'recovery.replan.attempts:=3', '-p', 'recovery.condition.start_escape.attempts:=3']),
             ('potential_fields', 'potential_fields_node', 'potential_fields',
              ['-p', 'use_lidar:=true', '-p', 'use_point_cloud:=true',
@@ -84,6 +85,8 @@ class NavigationIntegration(unittest.TestCase):
               '-p', 'laser_min_x:=0.1', '-p', 'laser_max_x:=1.0',
               '-p', 'laser_pot_fields_d0:=0.9', '-p', 'lidar_points_threshold:=0']),
         ]:
+            if package == 'navigation_manager':
+                extra += ['--log-level', 'navigation.navigation_manager:=debug']
             if package in ('simple_move', 'navigation_manager'):
                 extra += ['-p', f'allow_unknown:={str(cls.allow_unknown).lower()}']
             binary = FilePath(get_package_prefix(package)) / 'lib' / package / executable
@@ -511,17 +514,22 @@ class NavigationIntegration(unittest.TestCase):
         future = self.manager_params.call_async(request)
         self.wait_for(future.done)
         self.assertTrue(future.result().result.successful)
+        status = []
+        retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        subscription = self.node.create_subscription(
+            NavigationStatus, '/navigation/navigation_status', status.append, retained)
         try:
             type(self).planner_failure = 'start_blocked'
             self.send_goal(1.0,0.0)
             self.wait_for(lambda: any(s.status == 4 for s in self.statuses))
-            goal = self.statuses[-1].goal_id.id
+            goal = int(self.statuses[-1].goal_id.id)
+            self.wait_for(lambda: any(s.goal_id == goal and s.result_valid for s in status))
+            self.assertEqual(status[-1].reason, 'start_blocked')
             log = FilePath('/tmp/navigation_test_navigation_manager.log').read_text()
-            self.assertIn(f'NavigationDiagnostic goal={goal} ', log)
             self.assertIn(f'PlanDiagnostic goal={goal} ', log)
             self.assertIn('reason=start_blocked', log)
-            self.assertIn('reason=start_blocked state=4', log)
         finally:
+            self.node.destroy_subscription(subscription)
             request.parameters = [Parameter('debug_detection', value=False).to_parameter_msg()]
             future = self.manager_params.call_async(request)
             self.wait_for(future.done)
